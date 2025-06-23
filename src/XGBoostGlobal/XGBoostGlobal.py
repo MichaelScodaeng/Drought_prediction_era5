@@ -14,13 +14,15 @@ import xgboost as xgb
 import joblib
 import shap
 import matplotlib.pyplot as plt
-
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 class XGBoostGridMultiStepPipeline:
     def __init__(self, dataset, config_path: str = "config.yaml"):
         self.dataset = dataset
         self.config_path = config_path
         self.config = self._load_config(config_path)
         self.model = None
+        self.scaler_x = None
+        self.scaler_y = None
         self.X = None
         self.Y = None
         self.X_train = self.X_val = self.X_test = None
@@ -28,14 +30,21 @@ class XGBoostGridMultiStepPipeline:
 
         self.output_dir = os.path.join("run_outputs", self.config['project_name'])
         os.makedirs(self.output_dir, exist_ok=True)
-        print("Kuy output directory:", self.output_dir)
 
     def _load_config(self, path: str):
         with open(path, 'r') as f:
             return yaml.safe_load(f)
 
     def convert_to_tabular(self):
-        print("Converting dataset to tabular format...")
+        cache_x = os.path.join(self.output_dir, "X.npy")
+        cache_y = os.path.join(self.output_dir, "Y.npy")
+
+        if os.path.exists(cache_x) and os.path.exists(cache_y):
+            print("Loading cached tabular data...")
+            self.X = pd.DataFrame(np.load(cache_x))
+            self.Y = pd.DataFrame(np.load(cache_y))
+            return
+
         input_len = self.config['input_len']
         forecast_len = self.config['forecast_len']
         max_samples = self.config.get('max_samples', None)
@@ -47,7 +56,7 @@ class XGBoostGridMultiStepPipeline:
 
         X_list, Y_list = [], []
 
-        for t in tqdm(range(num_windows), desc="Creating tabular dataset"):
+        for t in tqdm(range(num_windows, desc="Creating tabular dataset")):
             x_seq = data[t:t+input_len]  # [input_len, F, H, W]
             y_seq = target[t+input_len:t+input_len+forecast_len]  # [forecast_len, H, W]
 
@@ -64,11 +73,23 @@ class XGBoostGridMultiStepPipeline:
             idx = np.random.choice(X.shape[0], max_samples, replace=False)
             X, Y = X[idx], Y[idx]
 
+        np.save(cache_x, X)
+        np.save(cache_y, Y)
+
         self.X = pd.DataFrame(X)
         self.Y = pd.DataFrame(Y, columns=[f"{self.config['target_variable']}_t+{i+1}" for i in range(forecast_len)])
 
+    def scale_data(self):
+        self.scaler_x = MinMaxScaler()
+        self.scaler_y = MinMaxScaler()
+
+        self.X = pd.DataFrame(self.scaler_x.fit_transform(self.X))
+        self.Y = pd.DataFrame(self.scaler_y.fit_transform(self.Y))
+
+        joblib.dump(self.scaler_x, os.path.join(self.output_dir, 'scaler_x.joblib'))
+        joblib.dump(self.scaler_y, os.path.join(self.output_dir, 'scaler_y.joblib'))
+
     def split_data(self):
-        print("Splitting data into train, validation, and test sets...")
         test_size = self.config.get('test_size', 0.2)
         val_size = self.config.get('val_size', 0.1)
 
@@ -83,6 +104,8 @@ class XGBoostGridMultiStepPipeline:
         self.Y_val = self.Y.iloc[train_len:train_len + val_len]
         self.X_test = self.X.iloc[train_len + val_len:]
         self.Y_test = self.Y.iloc[train_len + val_len:]
+
+
 
     def tune_hyperparameters(self):
         def objective(trial):
@@ -142,11 +165,13 @@ class XGBoostGridMultiStepPipeline:
     def evaluate(self, split='test'):
         X_eval = getattr(self, f"X_{split}")
         Y_eval = getattr(self, f"Y_{split}")
-        Y_pred = self.model.predict(X_eval)
+        Y_pred_scaled = self.model.predict(X_eval)
+        Y_pred = self.inverse_transform_predictions(Y_pred_scaled)
+        Y_true = self.inverse_transform_predictions(Y_eval.values)
 
         metrics = {}
         for i in range(self.Y.shape[1]):
-            y_true = Y_eval.iloc[:, i].values
+            y_true = Y_true[:, i]
             y_hat = Y_pred[:, i]
             metrics[f"step_{i+1}_rmse"] = mean_squared_error(y_true, y_hat, squared=False)
             metrics[f"step_{i+1}_mae"] = mean_absolute_error(y_true, y_hat)
@@ -166,7 +191,8 @@ class XGBoostGridMultiStepPipeline:
         return metrics
 
     def predict_and_save(self, num_samples: int = 1000):
-        preds = self.model.predict(self.X_test.iloc[:num_samples])
+        preds_scaled = self.model.predict(self.X_test.iloc[:num_samples])
+        preds = self.inverse_transform_predictions(preds_scaled)
         pred_df = pd.DataFrame(preds, columns=[f"pred_t+{i+1}" for i in range(preds.shape[1])])
         pred_df.to_csv(os.path.join(self.output_dir, "sample_predictions.csv"), index=False)
 
@@ -183,13 +209,39 @@ class XGBoostGridMultiStepPipeline:
         else:
             raise FileNotFoundError("Best model not found.")
 
+    def inverse_transform_predictions(self, preds):
+        return self.scaler_y.inverse_transform(preds)
+
+    def plot_train_val_loss(self):
+        path = os.path.join(self.output_dir, "train_val_loss.json")
+        if not os.path.exists(path):
+            print("Loss file not found.")
+            return
+
+        with open(path, 'r') as f:
+            loss = json.load(f)
+
+        num_outputs = len(loss['train'])
+        for i in range(num_outputs):
+            plt.figure()
+            plt.plot(loss['train'][i], label='Train')
+            plt.plot(loss['val'][i], label='Val')
+            plt.title(f"Output t+{i+1} RMSE")
+            plt.xlabel("Epoch")
+            plt.ylabel("RMSE")
+            plt.legend()
+            plt.savefig(os.path.join(self.output_dir, f"loss_output_t+{i+1}.png"))
+            plt.close()
+
     def run_all(self):
         self.convert_to_tabular()
+        self.scale_data()
         self.split_data()
         if self.config.get("enable_tuning", True):
             self.tune_hyperparameters()
         else:
             self.train()
+        self.plot_train_val_loss()
         val_metrics = self.evaluate("val")
         test_metrics = self.evaluate("test")
         print("Validation:", val_metrics)
