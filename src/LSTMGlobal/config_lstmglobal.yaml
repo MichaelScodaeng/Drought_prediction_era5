@@ -1,0 +1,55 @@
+project_setup:
+  target_variable: 'total_precipitation_6hr'
+  experiment_name: "lstm_weatherbench_global"
+
+data:
+  raw_data_path: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
+  time_range: ["2022-01", "2022-03"]
+  predictor_columns: [
+    '2m_temperature', '2m_dewpoint_temperature', 'surface_pressure',
+    'mean_sea_level_pressure', '10m_u_component_of_wind', '10m_v_component_of_wind',
+    '10m_wind_speed', 'u_component_of_wind', 'v_component_of_wind',
+    'total_column_water_vapour', 'integrated_vapor_transport', 'boundary_layer_height',
+    'specific_humidity', 'total_cloud_cover',
+    'mean_surface_net_short_wave_radiation_flux',
+    'mean_surface_latent_heat_flux', 'mean_surface_sensible_heat_flux',
+    'snow_depth', 'sea_surface_temperature', 'volumetric_soil_water_layer_1',
+    'mean_vertically_integrated_moisture_divergence', 'eddy_kinetic_energy',
+    'land_sea_mask'
+  ]
+  # Global bounds - adjust for your region of interest
+  lat_bounds: [21.0, 5.0]      # [North, South] - covers Northern hemisphere mid-latitudess
+  lon_bounds: [97, 106]     # [West, East] - covers Europe/Atlantic (longitude in [-180, 180])
+
+# Memory optimization settings
+scaling:
+  chunk_size: 1000                                    # Pixels to process at once during scaling
+  load_scaler_path: ""                               # Path to pre-fitted scaler (leave empty if none)
+  # scaler_x: "path/to/pretrained_scaler.joblib"     # Legacy - use load_scaler_path instead
+  # scaler_y: "path/to/pretrained_scaler_y.joblib"   # Legacy - use load_scaler_path instead
+
+# Data splitting
+test_size: 0.2
+val_size: 0.1
+
+# Number of workers for DataLoader (reduce if memory issues)
+num_workers: 2
+
+lstm_params:
+  n_steps_in: 12
+  n_steps_out: 6
+  batch_size: 8                   # Reduced from 16 for memory efficiency with large spatial data
+  hidden_size: 128
+  n_layers: 2
+  dropout_rate: 0.2
+  learning_rate: 0.001
+  max_epochs: 30
+
+  # Hyperparameter tuning
+  use_optuna: true
+  n_trials: 1
+  tuning_epochs: 1
+
+results:
+  metrics_filename: "global_metrics.json"
+  predictions_filename: "global_predictions.csv"
