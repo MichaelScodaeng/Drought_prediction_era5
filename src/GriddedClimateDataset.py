@@ -13,7 +13,7 @@ class GriddedClimateDataset(Dataset):
             self.ds = xr.open_dataset(file_path)
         else:
             self.ds = xr.open_zarr(file_path, consolidated=True, decode_times=False,
-                                   storage_options={"token": "anon", "asynchronous": False})
+                                   storage_options={"token": "anon", "asynchronous": True})
             from cftime import num2date
             units = self.ds.time.attrs.get("units", "hours since 1900-01-01 00:00:0.0")
             cal = self.ds.time.attrs.get("calendar", "standard")
