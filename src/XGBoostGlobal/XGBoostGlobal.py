@@ -6,15 +6,27 @@ import pandas as pd
 from tqdm import tqdm
 from typing import Tuple, Optional
 from sklearn.multioutput import MultiOutputRegressor
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, root_mean_squared_error
 from scipy.stats import pearsonr
 import optuna
 import xgboost as xgb
 import joblib
 import shap
+from xgboost.callback import EarlyStopping  # Import EarlyStopping callback
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
 from tqdm.auto import trange
+
+
+def to_python_type(obj):
+    if isinstance(obj, dict):
+        return {k: to_python_type(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [to_python_type(v) for v in obj]
+    elif isinstance(obj, (np.generic, np.ndarray)):
+        return obj.item()
+    else:
+        return obj
 class XGBoostGridMultiStepPipeline:
     def __init__(self, dataset, config_path: str = "config.yaml"):
         print("Initializing XGBoostGridMultiStepPipeline...")
@@ -83,7 +95,7 @@ class XGBoostGridMultiStepPipeline:
 
         input_len = self.config['input_len']
         forecast_len = self.config['forecast_len']
-        num_patches = self.config.get('num_patches', 10)
+        num_patches = self.config.get('num_patches', 2)
         spatial_size = tuple(self.config.get('patch_size', [32, 32]))
 
         X_list, Y_list = [], []
@@ -119,20 +131,23 @@ class XGBoostGridMultiStepPipeline:
         self.Y_test = self.Y.iloc[train_len + val_len:]
 
     def scale_data(self):
-        print("Scaling data using MinMaxScaler...")
-        self.scaler_x = MinMaxScaler()
-        self.scaler_y = MinMaxScaler()
-        print("[Scaling] Fitting scalers on training set only...")
-        self.X_train = pd.DataFrame(self.scaler_x.fit_transform(self.X_train))
-        self.Y_train = pd.DataFrame(self.scaler_y.fit_transform(self.Y_train))
+        print("Scaling data using precomputed global MinMaxScaler...")
+
+        # Load pre-fitted scalers (saved from global Dask scan)
+        self.scaler_x = joblib.load(self.config['scaler_x_path'])  # e.g., "scaler_x.joblib"
+        self.scaler_y = joblib.load(self.config['scaler_y_path'])  # e.g., "scaler_y.joblib"
+
+        print("[Scaling] Applying global MinMaxScaler...")
+        self.X_train = pd.DataFrame(self.scaler_x.transform(self.X_train))
+        self.Y_train = pd.DataFrame(self.scaler_y.transform(self.Y_train))
         self.X_val = pd.DataFrame(self.scaler_x.transform(self.X_val))
         self.Y_val = pd.DataFrame(self.scaler_y.transform(self.Y_val))
         self.X_test = pd.DataFrame(self.scaler_x.transform(self.X_test))
         self.Y_test = pd.DataFrame(self.scaler_y.transform(self.Y_test))
-        joblib.dump(self.scaler_x, os.path.join(self.output_dir, 'scaler_x.joblib'))
-        joblib.dump(self.scaler_y, os.path.join(self.output_dir, 'scaler_y.joblib'))
+
         print("[Scaling] X scaler range:", self.scaler_x.data_min_, self.scaler_x.data_max_)
         print("[Scaling] Y scaler range:", self.scaler_y.data_min_, self.scaler_y.data_max_)
+
 
     def inverse_transform_predictions(self, preds):
         return self.scaler_y.inverse_transform(preds)
@@ -150,7 +165,8 @@ class XGBoostGridMultiStepPipeline:
         df = pd.DataFrame(np.hstack([true, preds]), columns=
                         [f"true_t+{i+1}" for i in range(preds.shape[1])] +
                         [f"pred_t+{i+1}" for i in range(preds.shape[1])])
-        df.to_csv(os.path.join(self.output_dir, "sample_predictions.csv"), index=False)
+    ### PATCHED: tune_hyperparameters with safe Optuna objective (no multi-output eval_set)
+
     def tune_hyperparameters(self):
         def objective(trial):
             params = {
@@ -161,37 +177,55 @@ class XGBoostGridMultiStepPipeline:
                 'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
                 'gamma': trial.suggest_float('gamma', 0, 5),
                 'reg_alpha': trial.suggest_float('reg_alpha', 1e-8, 1.0, log=True),
-                'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 1.0, log=True)
+                'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 1.0, log=True),
+                'objective': 'reg:squarederror',
+                'eval_metric': 'rmse'
             }
-            model = MultiOutputRegressor(xgb.XGBRegressor(objective='reg:squarederror', eval_metric='rmse', early_stopping_rounds=10))
-            model.fit(self.X_train, self.Y_train, eval_set=[(self.X_val, self.Y_val)], verbose=False)
+
+            model = MultiOutputRegressor(xgb.XGBRegressor(**params))
+            model.fit(self.X_train, self.Y_train)  # No early stopping here!
             Y_pred = model.predict(self.X_val)
-            rmse = np.mean([mean_squared_error(self.Y_val.iloc[:, i], Y_pred[:, i], squared=False) for i in range(self.Y_val.shape[1])])
+            rmse = np.mean([
+                root_mean_squared_error(self.Y_val.iloc[:, i], Y_pred[:, i])
+                for i in range(self.Y_val.shape[1])
+            ])
             return rmse
 
         study = optuna.create_study(direction="minimize")
         study.optimize(objective, n_trials=self.config.get("n_trials", 20), show_progress_bar=True)
         best_params = study.best_trial.params
-        self.model = MultiOutputRegressor(xgb.XGBRegressor(objective='reg:squarederror', eval_metric='rmse', **best_params))
+
+        # Final retraining with early stopping (per output)
         history = {'train': [], 'val': []}
+        trained_estimators = []
         print("Retraining best model with early stopping and logging:")
-        for i, estimator in enumerate(tqdm(self.model.estimators_, desc="Training output models")):
+
+        for i in tqdm(range(self.Y_train.shape[1]), desc="Training output models"):
             evals_result = {}
+            estimator = xgb.XGBRegressor(
+                **best_params,
+                eval_metric='rmse',
+                early_stopping_rounds=10,
+            )
             estimator.fit(
                 self.X_train, self.Y_train.iloc[:, i],
                 eval_set=[(self.X_train, self.Y_train.iloc[:, i]), (self.X_val, self.Y_val.iloc[:, i])],
-                early_stopping_rounds=10,
-                eval_metric='rmse',
                 verbose=False,
-                callbacks=[xgb.callback.EvaluationMonitor(evals_result)]
             )
+            evals_result = estimator.evals_result()
             history['train'].append(evals_result['validation_0']['rmse'])
             history['val'].append(evals_result['validation_1']['rmse'])
+            trained_estimators.append(estimator)
+        
+        self.model = MultiOutputRegressor(estimator=None)
+        self.model.estimators_ = trained_estimators
+
         with open(os.path.join(self.output_dir, "train_val_loss.json"), 'w') as f:
             json.dump(history, f, indent=2)
         with open(os.path.join(self.output_dir, "best_hyperparams.json"), 'w') as f:
             json.dump(best_params, f, indent=2)
         joblib.dump(self.model, os.path.join(self.output_dir, "xgb_model_best.joblib"))
+
 
     def evaluate(self, split='test'):
         X_eval = getattr(self, f"X_{split}")
@@ -203,7 +237,7 @@ class XGBoostGridMultiStepPipeline:
         for i in range(self.Y.shape[1]):
             y_true = Y_true[:, i]
             y_hat = Y_pred[:, i]
-            metrics[f"step_{i+1}_rmse"] = mean_squared_error(y_true, y_hat, squared=False)
+            metrics[f"step_{i+1}_rmse"] = root_mean_squared_error(y_true, y_hat)
             metrics[f"step_{i+1}_mae"] = mean_absolute_error(y_true, y_hat)
             metrics[f"step_{i+1}_r2"] = r2_score(y_true, y_hat)
             metrics[f"step_{i+1}_nse"] = 1 - np.sum((y_true - y_hat)**2) / np.sum((y_true - np.mean(y_true))**2)
@@ -215,6 +249,7 @@ class XGBoostGridMultiStepPipeline:
             csi = tp / (tp + fp + fn + 1e-6)
             metrics[f"step_{i+1}_csi"] = csi
         metrics_path = os.path.join(self.output_dir, f"{split}_metrics.json")
+        metrics = to_python_type(metrics)
         with open(metrics_path, 'w') as f:
             json.dump(metrics, f, indent=2)
         return metrics
@@ -237,7 +272,7 @@ class XGBoostGridMultiStepPipeline:
             plt.legend()
             plt.savefig(os.path.join(self.output_dir, f"loss_output_t+{i+1}.png"))
             plt.close()
-
+    
     def explain(self, num_samples: int = 1000):
         explainer = shap.Explainer(self.model.estimators_[0])
         shap_values = explainer(self.X_val.iloc[:num_samples])
@@ -250,6 +285,8 @@ class XGBoostGridMultiStepPipeline:
             self.model = joblib.load(model_path)
         else:
             raise FileNotFoundError("Best model not found.")
+    # ...existing code...
+
 
     def run_all(self):
         self.convert_to_tabular()
@@ -260,6 +297,8 @@ class XGBoostGridMultiStepPipeline:
         else:
             self.train()
         self.plot_train_val_loss()
+        train_metrics = self.evaluate("train")
+        print("Training metrics:", train_metrics)
         val_metrics = self.evaluate("val")
         test_metrics = self.evaluate("test")
         print("Validation:", val_metrics)
