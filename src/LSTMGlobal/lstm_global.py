@@ -410,6 +410,9 @@ class LSTMPyTorchGlobalPipeline:
 
             model = LSTMRegressor(input_size, hidden_size, n_layers, output_size, dropout_rate)
             lightning_model = LSTMLightningModule(model, learning_rate)
+            print(f"🎮 GPU Available: {torch.cuda.is_available()}")
+            print(f"🎮 GPU Device: {torch.cuda.get_device_name(0)}")
+            print(f"🎮 Lightning using: {trainer.device}")
 
             trainer = pl.Trainer(
                 max_epochs=lstm_cfg.get("max_epochs", 10),
