@@ -14,7 +14,7 @@ import joblib
 import shap
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
-
+from tqdm.auto import trange
 class XGBoostGridMultiStepPipeline:
     def __init__(self, dataset, config_path: str = "config.yaml"):
         print("Initializing XGBoostGridMultiStepPipeline...")
@@ -53,7 +53,9 @@ class XGBoostGridMultiStepPipeline:
         T, F, H, W = data.shape
         num_windows = T - input_len - forecast_len + 1
         X_list, Y_list = [], []
-        for t in tqdm(range(num_windows), desc="Creating tabular dataset"):
+        
+
+        for t in trange(num_windows, desc="Creating tabular dataset"):
             x_seq = data[t:t+input_len]
             y_seq = target[t+input_len:t+input_len+forecast_len]
             x_flat = x_seq.transpose(1, 0, 2, 3).reshape(F * input_len, H * W).T
