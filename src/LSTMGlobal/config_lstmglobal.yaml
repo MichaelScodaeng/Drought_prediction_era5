@@ -7,14 +7,14 @@ data:
   time_range: ["2022-01", "2022-03"]
   predictor_columns: [
     '2m_temperature', '2m_dewpoint_temperature', 'surface_pressure',
-    'mean_sea_level_pressure', '10m_u_component_of_wind', '10m_v_component_of_wind',
-    '10m_wind_speed', 'u_component_of_wind', 'v_component_of_wind',
-    'total_column_water_vapour', 'integrated_vapor_transport', 'boundary_layer_height',
-    'specific_humidity', 'total_cloud_cover',
-    'mean_surface_net_short_wave_radiation_flux',
-    'mean_surface_latent_heat_flux', 'mean_surface_sensible_heat_flux',
-    'snow_depth', 'sea_surface_temperature', 'volumetric_soil_water_layer_1',
-    'mean_vertically_integrated_moisture_divergence', 'eddy_kinetic_energy',
+    #'mean_sea_level_pressure', '10m_u_component_of_wind', '10m_v_component_of_wind',
+    #'10m_wind_speed', 'u_component_of_wind', 'v_component_of_wind',
+    #'total_column_water_vapour', 'integrated_vapor_transport', 'boundary_layer_height',
+    #'specific_humidity', 'total_cloud_cover',
+    #'mean_surface_net_short_wave_radiation_flux',
+    #'mean_surface_latent_heat_flux', 'mean_surface_sensible_heat_flux',
+    #'snow_depth', 'sea_surface_temperature', 'volumetric_soil_water_layer_1',
+    #'mean_vertically_integrated_moisture_divergence', 'eddy_kinetic_energy',
     'land_sea_mask'
   ]
   # Global bounds - adjust for your region of interest
