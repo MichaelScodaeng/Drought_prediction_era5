@@ -37,7 +37,7 @@ class XGBoostGridMultiStepPipeline:
             return yaml.safe_load(f)
 
     def convert_to_tabular(self):
-        print("Converting dataset to tabular format...")
+        print("Converting dataset to tabular format using xarray streaming...")
         cache_x = os.path.join(self.output_dir, "X.npy")
         cache_y = os.path.join(self.output_dir, "Y.npy")
         if os.path.exists(cache_x) and os.path.exists(cache_y):
@@ -45,32 +45,45 @@ class XGBoostGridMultiStepPipeline:
             self.X = pd.DataFrame(np.load(cache_x))
             self.Y = pd.DataFrame(np.load(cache_y))
             return
+
         input_len = self.config['input_len']
         forecast_len = self.config['forecast_len']
         max_samples = self.config.get('max_samples', None)
-        data = self.dataset.data.values
-        target = self.dataset.target.values
+
+        data = self.dataset.data
+        target = self.dataset.target
         T, F, H, W = data.shape
         num_windows = T - input_len - forecast_len + 1
+
         X_list, Y_list = [], []
-        
         print(f"Creating {num_windows} windows of shape ({input_len}, {F}, {H}, {W}) for input and ({forecast_len}, {H}, {W}) for target...")
+
         for t in trange(num_windows, desc="Creating tabular dataset"):
-            x_seq = data[t:t+input_len]
-            y_seq = target[t+input_len:t+input_len+forecast_len]
-            x_flat = x_seq.transpose(1, 0, 2, 3).reshape(F * input_len, H * W).T
-            y_flat = y_seq.reshape(forecast_len, H * W).T
+            x_slice = data.isel(time=slice(t, t + input_len)).load()
+            y_slice = target.isel(time=slice(t + input_len, t + input_len + forecast_len)).load()
+
+            x_np = x_slice.transpose("variable", "time", "latitude", "longitude").values
+            y_np = y_slice.values
+
+            x_flat = x_np.reshape(x_np.shape[0] * x_np.shape[1], -1).T
+            y_flat = y_np.reshape(y_np.shape[0], -1).T
+
             X_list.append(x_flat)
             Y_list.append(y_flat)
+
         X = np.concatenate(X_list, axis=0)
         Y = np.concatenate(Y_list, axis=0)
+
         if max_samples and X.shape[0] > max_samples:
             idx = np.random.choice(X.shape[0], max_samples, replace=False)
             X, Y = X[idx], Y[idx]
+
         np.save(cache_x, X)
         np.save(cache_y, Y)
+
         self.X = pd.DataFrame(X)
         self.Y = pd.DataFrame(Y, columns=[f"{self.config['target_variable']}_t+{i+1}" for i in range(forecast_len)])
+
 
     def split_data(self):
         print("Splitting data into train, validation, and test sets...")
