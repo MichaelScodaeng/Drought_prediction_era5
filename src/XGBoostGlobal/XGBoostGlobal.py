@@ -54,7 +54,7 @@ class XGBoostGridMultiStepPipeline:
         num_windows = T - input_len - forecast_len + 1
         X_list, Y_list = [], []
         
-
+        print(f"Creating {num_windows} windows of shape ({input_len}, {F}, {H}, {W}) for input and ({forecast_len}, {H}, {W}) for target...")
         for t in trange(num_windows, desc="Creating tabular dataset"):
             x_seq = data[t:t+input_len]
             y_seq = target[t+input_len:t+input_len+forecast_len]
