@@ -7,13 +7,13 @@ from cftime import num2date
 class GriddedClimateDataset(Dataset):
     def __init__(self, file_path, input_len=12, forecast_len=1, variables=None,
                  target_variable=None, lat_bounds=(21.0, 5.0), lon_bounds=(97, 106),
-                 time_slice=slice("2020-01", "2023-01")):
+                 time_slice=slice("2022-01", "2022-02")):
         
         if file_path.endswith(".nc"):
             self.ds = xr.open_dataset(file_path)
         else:
             self.ds = xr.open_zarr(file_path, consolidated=True, decode_times=False,
-                                   storage_options={"token": "anon", "asynchronous": True})
+                                   storage_options={"token": "anon", "asynchronous": False})
             from cftime import num2date
             units = self.ds.time.attrs.get("units", "hours since 1900-01-01 00:00:0.0")
             cal = self.ds.time.attrs.get("calendar", "standard")

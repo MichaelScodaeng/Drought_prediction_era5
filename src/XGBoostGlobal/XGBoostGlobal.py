@@ -36,53 +36,71 @@ class XGBoostGridMultiStepPipeline:
         with open(path, 'r') as f:
             return yaml.safe_load(f)
 
+    def sample_random_patch(self, input_len, forecast_len, spatial_size=(32, 32)):
+        data = self.dataset.data
+        target = self.dataset.target
+
+        T, F, H, W = data.shape
+        max_time = T - input_len - forecast_len
+        lat_max = H - spatial_size[0]
+        lon_max = W - spatial_size[1]
+
+        t = np.random.randint(0, max_time)
+        lat = np.random.randint(0, lat_max)
+        lon = np.random.randint(0, lon_max)
+
+        x_patch = data.isel(
+            time=slice(t, t + input_len),
+            latitude=slice(lat, lat + spatial_size[0]),
+            longitude=slice(lon, lon + spatial_size[1])
+        ).load()
+
+        y_patch = target.isel(
+            time=slice(t + input_len, t + input_len + forecast_len),
+            latitude=slice(lat, lat + spatial_size[0]),
+            longitude=slice(lon, lon + spatial_size[1])
+        ).load()
+
+        x_np = x_patch.transpose("variable", "time", "latitude", "longitude").values
+        y_np = y_patch.values
+
+        x_flat = x_np.reshape(x_np.shape[0] * x_np.shape[1], -1).T
+        y_flat = y_np.reshape(y_np.shape[0], -1).T
+
+        valid = ~np.isnan(y_flat).any(axis=1)
+        return x_flat[valid], y_flat[valid]
+
+    # REPLACE convert_to_tabular WITH PATCH SAMPLING VARIANT
     def convert_to_tabular(self):
-        print("Converting dataset to tabular format using xarray streaming...")
-        cache_x = os.path.join(self.output_dir, "X.npy")
-        cache_y = os.path.join(self.output_dir, "Y.npy")
+        print("Generating patch-based training samples...")
+        cache_x = os.path.join(self.output_dir, "X_patch.npy")
+        cache_y = os.path.join(self.output_dir, "Y_patch.npy")
         if os.path.exists(cache_x) and os.path.exists(cache_y):
-            print("Loading cached tabular data...")
+            print("Loading cached patches...")
             self.X = pd.DataFrame(np.load(cache_x))
             self.Y = pd.DataFrame(np.load(cache_y))
             return
 
         input_len = self.config['input_len']
         forecast_len = self.config['forecast_len']
-        max_samples = self.config.get('max_samples', None)
-
-        data = self.dataset.data
-        target = self.dataset.target
-        T, F, H, W = data.shape
-        num_windows = T - input_len - forecast_len + 1
+        num_patches = self.config.get('num_patches', 10)
+        spatial_size = tuple(self.config.get('patch_size', [32, 32]))
 
         X_list, Y_list = [], []
-        print(f"Creating {num_windows} windows of shape ({input_len}, {F}, {H}, {W}) for input and ({forecast_len}, {H}, {W}) for target...")
+        for _ in trange(num_patches, desc="Sampling patches"):
+            x, y = self.sample_random_patch(input_len, forecast_len, spatial_size)
+            X_list.append(x)
+            Y_list.append(y)
 
-        for t in trange(num_windows, desc="Creating tabular dataset"):
-            x_slice = data.isel(time=slice(t, t + input_len)).load()
-            y_slice = target.isel(time=slice(t + input_len, t + input_len + forecast_len)).load()
-
-            x_np = x_slice.transpose("variable", "time", "latitude", "longitude").values
-            y_np = y_slice.values
-
-            x_flat = x_np.reshape(x_np.shape[0] * x_np.shape[1], -1).T
-            y_flat = y_np.reshape(y_np.shape[0], -1).T
-
-            X_list.append(x_flat)
-            Y_list.append(y_flat)
-
-        X = np.concatenate(X_list, axis=0)
-        Y = np.concatenate(Y_list, axis=0)
-
-        if max_samples and X.shape[0] > max_samples:
-            idx = np.random.choice(X.shape[0], max_samples, replace=False)
-            X, Y = X[idx], Y[idx]
+        X = np.vstack(X_list)
+        Y = np.vstack(Y_list)
 
         np.save(cache_x, X)
         np.save(cache_y, Y)
 
         self.X = pd.DataFrame(X)
         self.Y = pd.DataFrame(Y, columns=[f"{self.config['target_variable']}_t+{i+1}" for i in range(forecast_len)])
+
 
 
     def split_data(self):
