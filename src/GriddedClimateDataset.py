@@ -47,6 +47,7 @@ class GriddedClimateDataset(Dataset):
         self.target_variable = target_variable
         self.length = len(self.data.time) - input_len - forecast_len + 1
         print(f"Dataset initialized with {self.length} samples.")
+        print(f"Estimated size: {self.ds.nbytes / 1e6:.2f} MB")
 
 
 
